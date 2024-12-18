@@ -70,34 +70,21 @@ def detect_points_region_growing(volume_name, intensity_threshold=3000, x_min=90
     dimensions = image_data.GetDimensions()
     detected_regions = []
 
-    # Check if it's CT or CBCT based on volume name (or other criteria)
+    # Check if it's CT or CBCT
     is_cbct = "cbct" in volume_name.lower()
 
     if is_cbct:
-        # For CBCT, use actual dimensions
-        valid_x_min = 0
-        valid_x_max = dimensions[0] - 1
-        valid_y_min = 0
-        valid_y_max = dimensions[1] - 1
-        valid_z_min = 0
-        valid_z_max = dimensions[2] - 1
-        print(f"CBCT Volume {volume_name}: Using volume dimensions: x({valid_x_min}-{valid_x_max}), y({valid_y_min}-{valid_y_max}), z({valid_z_min}-{valid_z_max})")
+        valid_x_min, valid_x_max = 0, dimensions[0] - 1
+        valid_y_min, valid_y_max = 0, dimensions[1] - 1
+        valid_z_min, valid_z_max = 0, dimensions[2] - 1
     else:
-        # For CT, use user-provided bounds
-        valid_x_min = max(x_min, 0)
-        valid_x_max = min(x_max, dimensions[0] - 1)
-        valid_y_min = max(y_min, 0)
-        valid_y_max = min(y_max, dimensions[1] - 1)
-        valid_z_min = max(z_min, 0)
-        valid_z_max = min(z_max, dimensions[2] - 1)
-        print(f"CT Volume {volume_name}: Using bounds: x({valid_x_min}-{valid_x_max}), y({valid_y_min}-{valid_y_max}), z({valid_z_min}-{valid_z_max})")
+        valid_x_min, valid_x_max = max(x_min, 0), min(x_max, dimensions[0] - 1)
+        valid_y_min, valid_y_max = max(y_min, 0), min(y_max, dimensions[1] - 1)
+        valid_z_min, valid_z_max = max(z_min, 0), min(z_max, dimensions[2] - 1)
 
-    # Create a set to track visited voxels and avoid redundant searches
     visited = set()
 
-    # Define a helper function for region growing in a specific voxel
     def grow_region(x, y, z):
-        # Skip if already visited
         if (x, y, z) in visited:
             return None
 
@@ -105,42 +92,41 @@ def detect_points_region_growing(volume_name, intensity_threshold=3000, x_min=90
         if voxel_value < intensity_threshold:
             return None
 
-        # Perform region growing
         region = region_growing(image_data, (x, y, z), intensity_threshold, max_distance=max_distance)
         if region:
             for point in region:
-                visited.add(tuple(point))  # Mark voxel as visited
+                visited.add(tuple(point))
             return region
         return None
 
-    # Process voxels within the valid bounds
     regions = []
-    for z in range(valid_z_min, valid_z_max + 1):  # Iterate over z bounds in voxel space
-        for y in range(valid_y_min, valid_y_max + 1):  # Limit y values within bounds (voxel space)
-            for x in range(valid_x_min, valid_x_max + 1):  # Limit x values within bounds (voxel space)
+    for z in range(valid_z_min, valid_z_max + 1):
+        for y in range(valid_y_min, valid_y_max + 1):
+            for x in range(valid_x_min, valid_x_max + 1):
                 region = grow_region(x, y, z)
                 if region:
                     regions.append(region)
 
-    # Collect centroids from regions
+    # Collect centroids using intensity-weighted average
     centroids = []
     for region in regions:
         points = np.array([matrix.MultiplyPoint([*point, 1])[:3] for point in region])
-        centroid = np.mean(points, axis=0)
-        centroids.append(np.round(centroid, 2))  # Round to avoid floating point precision issues
+        intensities = np.array([image_data.GetScalarComponentAsDouble(*point, 0) for point in region])
+        
+        if intensities.sum() > 0:
+            weighted_centroid = np.average(points, axis=0, weights=intensities)
+            max_intensity = intensities.max()
+            centroids.append((np.round(weighted_centroid, 2), max_intensity))
 
-    # Merging centroids that are too close to each other (within `centroid_merge_threshold` mm)
     unique_centroids = []
-    for centroid in centroids:
-        # Check if the centroid is close to any existing ones (merge if within threshold)
-        if not any(np.linalg.norm(centroid - existing_centroid) < centroid_merge_threshold for existing_centroid in unique_centroids):
-            unique_centroids.append(centroid)
-
-    # Create markup points for each unique centroid
+    for centroid, intensity in centroids:
+        if not any(np.linalg.norm(centroid - existing_centroid) < centroid_merge_threshold for existing_centroid, _ in unique_centroids):
+            unique_centroids.append((centroid, intensity))
+            
     markups_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"Markers_{volume_name}")
-    for centroid in unique_centroids:
+    for centroid, intensity in unique_centroids:
         markups_node.AddControlPoint(*centroid)
-        print(f"Detected Centroid (RAS): {centroid}")
+        print(f"Detected Centroid (RAS): {centroid}, Max Intensity: {intensity}")
 
     return unique_centroids
 
